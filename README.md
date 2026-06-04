@@ -106,6 +106,94 @@ python -m erp_wms.demo --backend sqlite --state-file sample_data/demo-state.db
   `json` 使用 `sample_data/demo-state.json`
   `sqlite` 使用 `sample_data/demo-state.db`
 
+## 命令行操作
+
+当前原型还提供了一个最小 CLI，可直接对 JSON 或 SQLite 状态库执行业务动作。
+
+### 查看当前状态
+
+```bash
+python -m erp_wms.cli --backend sqlite snapshot
+```
+
+### 初始化演示数据
+
+```bash
+python -m erp_wms.cli --backend sqlite --reset bootstrap-demo
+```
+
+### 创建商品
+
+```bash
+python -m erp_wms.cli --backend sqlite create-product \
+  --master-sku MSKU-001 \
+  --name "Basic Tee" \
+  --specification "black / L" \
+  --attribute category=tee \
+  --attribute material=cotton
+```
+
+### 商品审核与入库
+
+```bash
+python -m erp_wms.cli --backend sqlite screen-product \
+  --master-sku MSKU-001 \
+  --can-list true \
+  --rule-note "approved for launch"
+
+python -m erp_wms.cli --backend sqlite set-price \
+  --master-sku MSKU-001 \
+  --cost-price 20 \
+  --pricing-factor 3
+
+python -m erp_wms.cli --backend sqlite approve-inbound \
+  --master-sku MSKU-001 \
+  --quantity 5 \
+  --cost-price 20 \
+  --pricing-factor 3
+```
+
+### 多店同步与店铺改价
+
+```bash
+python -m erp_wms.cli --backend sqlite sync-shops \
+  --master-sku MSKU-001 \
+  --shop douyin-a \
+  --shop douyin-b
+
+python -m erp_wms.cli --backend sqlite set-shop-price \
+  --master-sku MSKU-001 \
+  --shop-id douyin-b \
+  --price 79
+```
+
+### 抓单、发货、回传
+
+```bash
+python -m erp_wms.cli --backend sqlite capture-order \
+  --source douyin \
+  --source-order-id DY-1001 \
+  --master-sku MSKU-001 \
+  --quantity 1 \
+  --receiver-name Alice \
+  --address "Shanghai Pudong Test Road 18"
+
+python -m erp_wms.cli --backend sqlite ship-order \
+  --order-id ord-00012 \
+  --carrier SF \
+  --tracking-no SF123456
+
+python -m erp_wms.cli --backend sqlite report-order \
+  --order-id ord-00012
+```
+
+### CLI 说明
+
+- CLI 默认后端为 `sqlite`
+- 可用 `--state-file` 指向指定状态文件
+- 每次命令执行后会自动保存当前状态
+- 更适合日常试跑和业务链路演示
+
 ## 运行测试
 
 ```bash
@@ -122,6 +210,7 @@ python -m unittest discover -s tests -v
 - JSON 文件持久化与续跑
 - demo 种子数据防重复灌入
 - SQLite 持久化与状态恢复
+- CLI 驱动的 SQLite 工作流
 
 ## 现阶段定位
 

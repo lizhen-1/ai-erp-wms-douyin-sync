@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from erp_wms.cli import main as cli_main
 from erp_wms.demo import bootstrap_demo_data, load_repository, save_repository
 from erp_wms.models import OrderStatus, ProductStatus, SyncTaskStatus
 from erp_wms.repository import InMemoryRepository, SQLiteRepository
@@ -11,6 +14,10 @@ from erp_wms.services import WMSService
 
 
 class WorkflowTests(unittest.TestCase):
+    def run_cli(self, argv: list[str]) -> None:
+        with redirect_stdout(StringIO()):
+            cli_main(argv)
+
     def setUp(self) -> None:
         self.repo = InMemoryRepository()
         self.service = WMSService(self.repo)
@@ -168,6 +175,79 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(order.status, OrderStatus.READY_TO_SHIP)
             self.assertEqual(len(restored_repo.shop_mappings), 1)
             restored_repo.close()
+
+    def test_cli_flow_updates_sqlite_repository(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "cli-state.db"
+
+            self.run_cli(
+                [
+                    "--backend",
+                    "sqlite",
+                    "--state-file",
+                    str(database_path),
+                    "create-product",
+                    "--master-sku",
+                    "MSKU-CLI-001",
+                    "--name",
+                    "CLI Hoodie",
+                    "--specification",
+                    "gray / XL",
+                    "--attribute",
+                    "category=hoodie",
+                ]
+            )
+            self.run_cli(
+                [
+                    "--backend",
+                    "sqlite",
+                    "--state-file",
+                    str(database_path),
+                    "screen-product",
+                    "--master-sku",
+                    "MSKU-CLI-001",
+                    "--can-list",
+                    "true",
+                    "--rule-note",
+                    "cli-approved",
+                ]
+            )
+            self.run_cli(
+                [
+                    "--backend",
+                    "sqlite",
+                    "--state-file",
+                    str(database_path),
+                    "approve-inbound",
+                    "--master-sku",
+                    "MSKU-CLI-001",
+                    "--quantity",
+                    "2",
+                    "--cost-price",
+                    "35",
+                    "--pricing-factor",
+                    "2.2",
+                ]
+            )
+            self.run_cli(
+                [
+                    "--backend",
+                    "sqlite",
+                    "--state-file",
+                    str(database_path),
+                    "sync-shops",
+                    "--master-sku",
+                    "MSKU-CLI-001",
+                    "--shop",
+                    "douyin-a",
+                ]
+            )
+
+            repo = SQLiteRepository(database_path)
+            self.assertEqual(repo.inventory_by_sku["MSKU-CLI-001"], 2)
+            self.assertEqual(repo.products["MSKU-CLI-001"].status, ProductStatus.SYNCED)
+            self.assertEqual(len(repo.shop_mappings), 1)
+            repo.close()
 
 
 if __name__ == "__main__":
