@@ -74,10 +74,36 @@ class WMSService:
         self.repo = repository
         self.gateway = gateway or DouyinGateway()
         self.ai = ai_assistant or AIAssistant()
-        self._seq = count(1)
+        self._seq = count(self._starting_sequence())
+
+    def _starting_sequence(self) -> int:
+        prefixes = ("log", "exc", "prd", "inb", "inv", "syn", "map", "ord", "shp")
+        max_seq = 0
+        for collection in (
+            self.repo.audit_logs,
+            self.repo.exception_tasks.values(),
+            self.repo.products.values(),
+            self.repo.inbounds.values(),
+            self.repo.inventory_entries,
+            self.repo.sync_tasks.values(),
+            self.repo.shop_mappings.values(),
+            self.repo.orders.values(),
+            self.repo.shipments.values(),
+        ):
+            for item in collection:
+                for value in vars(item).values():
+                    if not isinstance(value, str):
+                        continue
+                    prefix, _, seq = value.partition("-")
+                    if prefix in prefixes and seq.isdigit():
+                        max_seq = max(max_seq, int(seq))
+        return max_seq + 1
 
     def _next_id(self, prefix: str) -> str:
         return f"{prefix}-{next(self._seq):05d}"
+
+    def _commit(self) -> None:
+        self.repo.commit()
 
     def _audit(self, action: str, reference_id: str, details: dict[str, str]) -> None:
         self.repo.audit_logs.append(
@@ -116,6 +142,7 @@ class WMSService:
         )
         self.repo.products[master_sku] = product
         self._audit("product_created", master_sku, {"name": name})
+        self._commit()
         return product
 
     def screen_for_listing(self, master_sku: str, *, can_list: bool, rule_note: str) -> ProductMaster:
@@ -124,6 +151,7 @@ class WMSService:
         product.listing_rules["screening_note"] = rule_note
         product.status = ProductStatus.PENDING_PRICING if can_list else ProductStatus.PENDING_SCREENING
         self._audit("product_screened", master_sku, {"can_list": str(can_list), "note": rule_note})
+        self._commit()
         return product
 
     def set_default_price(self, master_sku: str, *, cost_price: float, pricing_factor: float) -> ProductMaster:
@@ -135,6 +163,7 @@ class WMSService:
             master_sku,
             {"cost_price": str(cost_price), "pricing_factor": str(pricing_factor), "price": str(product.default_price)},
         )
+        self._commit()
         return product
 
     def approve_inbound(
@@ -163,6 +192,7 @@ class WMSService:
         product.status = ProductStatus.PENDING_SYNC
         self._change_inventory(master_sku, quantity, "inbound_approved")
         self._audit("inbound_approved", receipt.receipt_id, {"master_sku": master_sku, "quantity": str(quantity)})
+        self._commit()
         return receipt
 
     def _change_inventory(self, master_sku: str, delta: int, reason: str) -> None:
@@ -214,6 +244,7 @@ class WMSService:
             product.status = ProductStatus.SYNC_EXCEPTION
 
         self._audit("shop_sync_completed", task.task_id, {"master_sku": master_sku, "status": task.status})
+        self._commit()
         return task
 
     def _find_or_create_mapping(self, master_sku: str, shop_id: str) -> ShopSkuMapping:
@@ -228,6 +259,7 @@ class WMSService:
         mapping = self._find_or_create_mapping(master_sku, shop_id)
         mapping.override_price = price
         self._audit("shop_price_override_set", mapping.mapping_id, {"price": str(price)})
+        self._commit()
         return mapping
 
     def capture_order(
@@ -268,6 +300,7 @@ class WMSService:
         if order.exceptions:
             self._raise_exception("order_review", order.order_id, ",".join(order.exceptions))
         self._audit("order_captured", order.order_id, {"status": order.status, "source": source})
+        self._commit()
         return order
 
     def ship_order(self, order_id: str, *, carrier: str, tracking_no: str) -> Shipment:
@@ -288,6 +321,7 @@ class WMSService:
         order.status = OrderStatus.SHIPPED
         self._audit("order_shipped", order_id, {"carrier": carrier, "tracking_no": tracking_no})
         self._delist_if_needed(order.master_sku)
+        self._commit()
         return shipment
 
     def _delist_if_needed(self, master_sku: str) -> None:
@@ -316,6 +350,7 @@ class WMSService:
             raise ValueError("order must be shipped before reporting")
         order.status = OrderStatus.REPORTED
         self._audit("order_reported", order_id, {"source_order_id": order.source_order_id})
+        self._commit()
         return order
 
     def snapshot(self) -> dict[str, object]:

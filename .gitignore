@@ -15,3 +15,8 @@ htmlcov/
 
 .DS_Store
 Thumbs.db
+.codex_tmp/
+sample_data/demo-state*.json
+sample_data/demo-state*.db
+sample_data/demo-*-test.json
+sample_data/demo-*-test.db

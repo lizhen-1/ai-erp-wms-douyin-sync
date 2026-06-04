@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from erp_wms.demo import bootstrap_demo_data, load_repository, save_repository
 from erp_wms.models import OrderStatus, ProductStatus, SyncTaskStatus
-from erp_wms.repository import InMemoryRepository
+from erp_wms.repository import InMemoryRepository, SQLiteRepository
 from erp_wms.services import WMSService
 
 
@@ -73,6 +76,98 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.repo.inventory_by_sku["MSKU-001"], 0)
         self.assertEqual(self.repo.products["MSKU-001"].status, ProductStatus.DELISTED)
         self.assertTrue(all(not m.published for m in self.repo.shop_mappings.values()))
+
+    def test_repository_snapshot_roundtrip_preserves_workflow_state(self) -> None:
+        self.service.approve_inbound("MSKU-001", quantity=3, cost_price=20, pricing_factor=3)
+        self.service.sync_to_shops("MSKU-001", ["douyin-a"])
+        order = self.service.capture_order(
+            source="douyin",
+            source_order_id="DY-2",
+            master_sku="MSKU-001",
+            quantity=1,
+            receiver_name="Dai",
+            address="Suzhou Park 66",
+        )
+        self.service.ship_order(order.order_id, carrier="ZTO", tracking_no="ZT002")
+
+        snapshot = self.repo.to_snapshot()
+        restored_repo = InMemoryRepository.from_snapshot(snapshot)
+
+        self.assertEqual(restored_repo.inventory_by_sku["MSKU-001"], 2)
+        self.assertEqual(restored_repo.products["MSKU-001"].status, ProductStatus.SYNCED)
+        self.assertEqual(restored_repo.orders[order.order_id].status, OrderStatus.SHIPPED)
+        self.assertEqual(len(restored_repo.audit_logs), len(self.repo.audit_logs))
+
+    def test_repository_file_roundtrip_supports_continued_operations(self) -> None:
+        self.service.approve_inbound("MSKU-001", quantity=2, cost_price=20, pricing_factor=3)
+
+        with TemporaryDirectory() as temp_dir:
+            snapshot_path = Path(temp_dir) / "repo-state.json"
+            self.repo.save_to_file(snapshot_path)
+
+            restored_repo = InMemoryRepository.load_from_file(snapshot_path)
+            restored_service = WMSService(restored_repo)
+            order = restored_service.capture_order(
+                source="douyin",
+                source_order_id="DY-3",
+                master_sku="MSKU-001",
+                quantity=1,
+                receiver_name="Eve",
+                address="Ningbo Center 10",
+            )
+
+        self.assertEqual(order.order_id, "ord-00009")
+        self.assertEqual(restored_repo.orders[order.order_id].status, OrderStatus.READY_TO_SHIP)
+
+    def test_demo_bootstrap_reuses_saved_state_without_duplicate_seed_data(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "demo-state.json"
+
+            repo = load_repository("json", state_file, reset=False)
+            service = WMSService(repo)
+            bootstrap_demo_data(service)
+            save_repository(repo, state_file, backend="json")
+
+            restored_repo = load_repository("json", state_file, reset=False)
+            restored_service = WMSService(restored_repo)
+            bootstrap_demo_data(restored_service)
+
+        self.assertEqual(len(restored_repo.products), 1)
+        self.assertEqual(len(restored_repo.orders), 1)
+        self.assertEqual(restored_repo.inventory_by_sku["MSKU-COAT-001"], 2)
+
+    def test_sqlite_repository_persists_and_restores_workflow_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "erp-wms.db"
+            repo = SQLiteRepository(database_path)
+            service = WMSService(repo)
+            service.create_product(
+                master_sku="MSKU-SQL-001",
+                name="SQLite tee",
+                specification="black / M",
+                base_attributes={"category": "tee"},
+            )
+            service.screen_for_listing("MSKU-SQL-001", can_list=True, rule_note="sqlite-ready")
+            service.approve_inbound("MSKU-SQL-001", quantity=4, cost_price=30, pricing_factor=2)
+            service.sync_to_shops("MSKU-SQL-001", ["douyin-a"])
+            repo.close()
+
+            restored_repo = SQLiteRepository(database_path)
+            restored_service = WMSService(restored_repo)
+            order = restored_service.capture_order(
+                source="douyin",
+                source_order_id="DY-SQL-1",
+                master_sku="MSKU-SQL-001",
+                quantity=1,
+                receiver_name="Fang",
+                address="Wuhan Optics Valley 1",
+            )
+
+            self.assertEqual(restored_repo.inventory_by_sku["MSKU-SQL-001"], 4)
+            self.assertEqual(restored_repo.products["MSKU-SQL-001"].status, ProductStatus.SYNCED)
+            self.assertEqual(order.status, OrderStatus.READY_TO_SHIP)
+            self.assertEqual(len(restored_repo.shop_mappings), 1)
+            restored_repo.close()
 
 
 if __name__ == "__main__":
